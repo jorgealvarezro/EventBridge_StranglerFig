@@ -7,12 +7,16 @@ Parameters:
     Description: Use an AMI of your choosing, we recommend to use the latest available
   MonolithRepository:
     Type: String
-    Default: https://github.com/aws-samples/unishop-monolith-to-microservices.git
+    Default: https://github.com/jorgealvarezro/EventBridge_StranglerFig.git
     Description: The repo to clone for the Monolith Legacy Application
   MonolithBranch:
     Type: String
-    Default: reinvent2023
+    Default: main
     Description: The repo branch to use for the Monolith Legacy Application
+  MyIPAddress:
+    Type: String
+    Description: My public IP Address
+
 Resources:
   MonoToMicroVPC:
     Type: AWS::EC2::VPC
@@ -211,20 +215,20 @@ Resources:
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
-          CidrIp: 0.0.0.0/0
+          CidrIp: !Ref MyIPAddress
         - IpProtocol: tcp
           FromPort: 443
           ToPort: 443
-          CidrIp: 0.0.0.0/0
+          CidrIp: !Ref MyIPAddress
       SecurityGroupEgress:
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
-          CidrIp: 0.0.0.0/0
+          CidrIp: !Ref MyIPAddress
         - IpProtocol: tcp
           FromPort: 443
           ToPort: 443
-          CidrIp: 0.0.0.0/0
+          CidrIp: !Ref MyIPAddress
       Tags:
         - Key: Name
           Value: MonoToMicroEC2SG
@@ -240,78 +244,6 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       RetentionInDays: 7
-  S3InstanceProfile:
-    Type: AWS::IAM::InstanceProfile
-    Properties:
-      Path: /
-      Roles:
-        - !Ref S3Role
-  S3Policy:
-    Type: AWS::IAM::Policy
-    Properties:
-      PolicyName: !Sub ${AWS::StackName}-S3Policy
-      PolicyDocument:
-        Statement:
-          - Effect: Allow
-            Action:
-              - s3:GetBucketLocation
-              - s3:GetObject
-              - s3:PutObject
-            Resource:
-              - !GetAtt UIBucket.Arn
-              - !GetAtt AssetBucket.Arn
-              - !Join
-                - ''
-                - - !GetAtt UIBucket.Arn
-                  - /*
-              - !Join
-                - ''
-                - - !GetAtt AssetBucket.Arn
-                  - /*
-      Roles:
-        - !Ref S3Role
-
-  S3Role:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub ${AWS::StackName}-MonoToMicroRole
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - ec2.amazonaws.com
-            Action:
-              - sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
-      Path: /
-
-  UIBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      PublicAccessBlockConfiguration:
-        BlockPublicPolicy: true
-      WebsiteConfiguration:
-        ErrorDocument: error.html
-        IndexDocument: index.html
-  # UIBucketPolicy:
-  #  Type: AWS::S3::BucketPolicy
-  #  Properties:
-  #    Bucket: !Ref UIBucket
-  #    PolicyDocument:
-  #      Version: 2012-10-17
-   #     Statement:
-    #      - Action: ['s3:GetObject']
-     #       Effect: Allow
-      #      Resource:
-       #       !Sub 'arn:aws:s3:::${UIBucket}/*'
-        #    Principal: '*'
-  AssetBucket:
-   Type: AWS::S3::Bucket
-
   DBInstance:
     Type: AWS::EC2::Instance
     CreationPolicy:
@@ -364,7 +296,7 @@ Resources:
       SubnetId: !Ref MonoToMicroSubnet1
       SecurityGroupIds:
         - !Ref DBSecurityGroup
-      IamInstanceProfile: !Ref S3InstanceProfile
+      
       UserData:
         Fn::Base64:
           !Sub |
@@ -398,8 +330,6 @@ Resources:
               command: sudo yum update -y
         install:
           packages:
-            rpm:
-              https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm: []
             yum:
               amazon-cloudwatch-agent: []
               git: []
@@ -424,8 +354,6 @@ Resources:
               command: |
                 cd /home/ec2-user/MonoToMicro/MonoToMicroLegacy
                 ./gradlew clean build
-                cd /home/ec2-user/MonoToMicro/MonoToMicroLambda
-                ./gradlew clean shadowJar
             3-install-nginx:
               command: !Join
                 - ''
@@ -447,12 +375,6 @@ Resources:
                     echo 'location /api/ { proxy_pass http://127.0.0.1:8080/; }' > /etc/nginx/default.d/001-api.conf
                   - >
                     systemctl start nginx
-            4-populate-buckets:
-              command: !Sub |
-                AWS_DEFAULT_REGION=${AWS::Region}
-                aws s3 cp /home/ec2-user/MonoToMicro/MonoToMicroUI s3://${UIBucket}/ --recursive
-                aws s3 cp /home/ec2-user/MonoToMicro/MonoToMicroLambda/build/libs s3://${AssetBucket}/ --recursive
-                aws s3 cp /home/ec2-user/MonoToMicro/MonoToMicroLegacy/build/libs s3://${AssetBucket}/ --recursive
         create-service-files:
           files:
             /etc/systemd/system/mono2micro.service:
@@ -492,9 +414,7 @@ Resources:
                   export Database=${DB}
                   export MONO_TO_MICRO_DB_ENDPOINT=${DB}
                   export AWS_DEFAULT_REGION=${AWS::Region}
-                  export UI_RANDOM_NAME=${UIBucket}
 
-                  export ASSETS_RANDOM_NAME=${AssetBucket}
                 - { DB: !GetAtt 'DBInstance.PrivateDnsName' }
               mode: '000555'
               group: ec2-user
@@ -527,7 +447,6 @@ Resources:
       SubnetId: !Ref MonoToMicroSubnet1
       SecurityGroupIds:
         - !Ref EC2SecurityGroup
-      IamInstanceProfile: !Ref S3InstanceProfile
       UserData:
         Fn::Base64:
           !Sub |
@@ -558,138 +477,6 @@ Resources:
       Type: String
       Description: Monolith VPC ID
 
-  LambdaAssetBucketSSMParam:
-    Type: AWS::SSM::Parameter
-    Properties:
-      Name: LambdaAssetBucketName
-      Type: String
-      Value: !Ref AssetBucket
-
-  ApplicationAssetBucketSSMParam:
-    Type: AWS::SSM::Parameter
-    Properties:
-      Name: ApplicationAssetBucketName
-      Type: String
-      Value: !Ref AssetBucket
-
-  # Pre-create RefactorSpaces environment to save time
-  UniShopRefactorSpacesModernizationEnvironment:
-    Type: AWS::RefactorSpaces::Environment
-    Properties:
-      Name: unistore-dev
-      NetworkFabricType: NONE
-      Description: A Refactor Spaces environment for the Unicorn store
-
-  UniShopRefactorSpacesApplication:
-    Type: AWS::RefactorSpaces::Application
-    Properties:
-      Name: unistore
-      EnvironmentIdentifier: !Ref UniShopRefactorSpacesModernizationEnvironment
-      VpcId: !Ref MonoToMicroVPC
-      ProxyType: API_GATEWAY
-      ApiGatewayProxy:
-        EndpointType: REGIONAL
-    DependsOn:
-      - MonoToMicroSubnet1
-      - MonoToMicroSubnet2
-
-
-  RDSCluster:
-    Type: AWS::RDS::DBCluster
-    Properties:
-      DBClusterIdentifier: !Sub ${AWS::StackName}-MonoToMicroDBCluster
-      DBSubnetGroupName: !Ref DBSubnetGroup
-      Engine: aurora-mysql
-      EngineMode: provisioned
-      EngineVersion: 5.7.mysql_aurora.2.11.2
-      MasterUsername: MonoToMicroUser
-      MasterUserPassword: MonoToMicroPassword
-      Port: 3306
-      Tags:
-        - Key: Name
-          Value: !Sub "${AWS::StackName}-cluster"
-      VpcSecurityGroupIds: [!Ref DBSecurityGroup]
-
-  RDSInstance:
-    Type: AWS::RDS::DBInstance
-    DeletionPolicy: Delete
-    Properties:
-      DBClusterIdentifier:
-        Ref: RDSCluster
-      DBInstanceIdentifier: !Sub ${AWS::StackName}-MonoToMicroDB
-      Engine: aurora-mysql
-      DBSubnetGroupName: !Ref DBSubnetGroup
-      DBInstanceClass: db.r6i.2xlarge
-      MultiAZ: false
-      Tags:
-        - Key: Name
-          Value: MonoToMicroDB
-
-  MySQLSourceEndpoint:
-    Type: 'AWS::DMS::Endpoint'
-    Properties:
-      EndpointIdentifier: mysqlsource
-      EndpointType: source
-      EngineName: mysql
-      Port: 3306
-      ServerName: !GetAtt DBInstance.PrivateDnsName
-      Username: MonoToMicroUser
-      Password: MonoToMicroPassword
-      Tags:
-        - Key: Name
-          Value: MonoToMicroSourceDMSEndpoint
-
-  MySQLTargetEndpoint:
-    Type: 'AWS::DMS::Endpoint'
-    Properties:
-      EndpointIdentifier: mysqltarget
-      EndpointType: target
-      EngineName: aurora
-      Port: 3306
-      ServerName: !GetAtt  RDSInstance.Endpoint.Address
-      Username: MonoToMicroUser
-      Password: MonoToMicroPassword
-      Tags:
-        - Key: Name
-          Value: MonoToMicroTargetDMSEndpoint
-
-  MonoToMicroDmsVpcRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: dms-vpc-role
-      AssumeRolePolicyDocument:
-        Version : 2012-10-17
-        Statement :
-          -
-            Effect : Allow
-            Principal :
-              Service :
-                - dms.amazonaws.com
-            Action :
-              - sts:AssumeRole
-      Path : /
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AmazonDMSVPCManagementRole
-
-  MonoToMicroReplicationInstanceSubnetGroup:
-    Type: "AWS::DMS::ReplicationSubnetGroup"
-    DependsOn: MonoToMicroDmsVpcRole
-    Properties:
-      ReplicationSubnetGroupDescription: Basic Replication Instance Subnet Group
-      SubnetIds:
-        - !Ref MonoToMicroSubnet1
-        - !Ref MonoToMicroSubnet2
-
-  MonoToMicroReplicationInstance:
-    Type: "AWS::DMS::ReplicationInstance"
-    DependsOn: MonoToMicroDmsVpcRole
-    Properties:
-      ReplicationInstanceClass: dms.t3.medium
-      PubliclyAccessible: false
-      VpcSecurityGroupIds:
-        - !Ref DBSecurityGroup
-      ReplicationSubnetGroupIdentifier: !Ref MonoToMicroReplicationInstanceSubnetGroup
-
 Outputs:
   WebsiteURL:
     Value: !GetAtt
@@ -701,9 +488,3 @@ Outputs:
       - VpcIdSSMParam
       - Value
     Description: VPC where the monolith is running
-  AssetBucket:
-    Value: !Ref AssetBucket
-    Description: S3 Bucket containing the compiled Java code
-  UIBucket:
-    Value: !Ref UIBucket
-    Description: S3 Bucket containing the UniShop website
