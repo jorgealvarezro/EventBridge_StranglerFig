@@ -44,7 +44,9 @@ dependencies {
 	implementation group: 'org.springframework', name: 'spring-tx'//, version: '2.5.4'
 	implementation group: 'org.springframework', name: 'spring-jdbc'//, version: '3.2.1.RELEASE'
 	implementation group: 'org.springframework.security', name: 'spring-security-crypto', version: '5.1.2.RELEASE'
-    
+	implementation 'com.amazonaws:aws-xray-recorder-sdk-spring:2.11.0'
+	implementation 'org.springframework.boot:spring-boot-starter-aop:2.5.2'
+
     //apache commons
     //compile 'commons-fileupload:commons-fileupload:1.2'
     //compile 'commons-io:commons-io:2.4'

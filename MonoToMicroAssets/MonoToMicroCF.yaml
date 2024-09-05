@@ -244,6 +244,28 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       RetentionInDays: 7
+  
+  XRAYInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref XRAYInstanceRole
+
+  XRAYInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-XRAYInstanceRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
   DBInstance:
     Type: AWS::EC2::Instance
     CreationPolicy:
@@ -423,7 +445,8 @@ Resources:
               encoding: plain
               content: |
                 #!/bin/bash
-                java -jar /home/ec2-user/MonoToMicro/MonoToMicroLegacy/build/libs/MonoToMicroLegacy-0.0.1-SNAPSHOT.jar &> /home/ec2-user/MonoToMicro/MonoToMicroLegacy/build/libs/app.log &
+                export AWS_XRAY_TRACING_NAME="My LegacyApp"
+                java -javaagent:/<path-to-disco>/disco-java-agent.jar=pluginPath=/<path-to-disco>/disco-plugins -jar /home/ec2-user/MonoToMicro/MonoToMicroLegacy/build/libs/MonoToMicroLegacy-0.0.1-SNAPSHOT.jar &> /home/ec2-user/MonoToMicro/MonoToMicroLegacy/build/libs/app.log &
               mode: '000555'
               group: ec2-user
               user: ec2-user
@@ -445,6 +468,7 @@ Resources:
       InstanceType: t3.small
       ImageId: !Ref LatestAmiId
       SubnetId: !Ref MonoToMicroSubnet1
+      IamInstanceProfile: !Ref XRAYInstanceProfile
       SecurityGroupIds:
         - !Ref EC2SecurityGroup
       UserData:
@@ -455,6 +479,8 @@ Resources:
           /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource EC2Instance --region ${AWS::Region} --configsets default
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource EC2Instance --region ${AWS::Region}
 
+          curl https://s3.us-east-2.amazonaws.com/aws-xray-assets.us-east-2/xray-daemon/aws-xray-daemon-3.x.rpm -o /home/ec2-user/xray.rpm
+          yum install -y /home/ec2-user/xray.rpm
       Tags:
         - Key: Name
           Value: MonoToMicroEC2
