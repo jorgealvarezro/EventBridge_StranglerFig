@@ -26,3 +26,4 @@ build/
 *.tar
 *.zip
 !gradle-wrapper.jar
+.vscode/settings.json
