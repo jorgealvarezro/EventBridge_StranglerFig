@@ -445,6 +445,13 @@ Resources:
               encoding: plain
               content: |
                 #!/bin/bash
+                curl https://s3.us-east-2.amazonaws.com/aws-xray-assets.us-east-2/xray-daemon/aws-xray-daemon-3.x.rpm -o /home/ec2-user/xray.rpm
+                yum install -y /home/ec2-user/xray.rpm
+
+                cd /home/ec2-user/
+                wget https://github.com/aws/aws-xray-java-agent/releases/latest/download/xray-agent.zip
+                mkdir -p /home/ec2-user/MonoToMicro/xrayagent/
+                unzip /home/ec2-user/xray-agent.zip -d /home/ec2-user/MonoToMicro/xrayagent/
                 export AWS_XRAY_TRACING_NAME="My LegacyApp"
                 java -javaagent:/home/ec2-user/MonoToMicro/xrayagent/disco/disco-java-agent.jar=pluginPath=/home/ec2-user/MonoToMicro/xrayagent/disco/disco-plugins -jar /home/ec2-user/MonoToMicro/MonoToMicroLegacy/build/libs/MonoToMicroLegacy-0.0.1-SNAPSHOT.jar &> /home/ec2-user/MonoToMicro/MonoToMicroLegacy/build/libs/app.log &
               mode: '000555'
@@ -478,15 +485,6 @@ Resources:
           sudo yum install -y aws-cfn-bootstrap 
           /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource EC2Instance --region ${AWS::Region} --configsets default
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource EC2Instance --region ${AWS::Region}
-
-          curl https://s3.us-east-2.amazonaws.com/aws-xray-assets.us-east-2/xray-daemon/aws-xray-daemon-3.x.rpm -o /home/ec2-user/xray.rpm
-          yum install -y /home/ec2-user/xray.rpm
-
-          cd /home/ec2-user/
-          wget https://github.com/aws/aws-xray-java-agent/releases/latest/download/xray-agent.zip
-          mkdir -p /home/ec2-user/MonoToMicro/xrayagent/
-          unzip /home/ec2-user/xray-agent.zip -d /home/ec2-user/MonoToMicro/xrayagent/
-
       Tags:
         - Key: Name
           Value: MonoToMicroEC2
