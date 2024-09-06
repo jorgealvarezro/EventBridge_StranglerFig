@@ -446,8 +446,7 @@ Resources:
               content: |
                 #!/bin/bash
                 export AWS_XRAY_TRACING_NAME="My LegacyApp"
-                java -javaagent:/home/ec2-user/MonoToMicro/xrayagent/disco/disco-java-agent.jar=pluginPath=/home/ec2-user/MonoToMicro/xrayagent/disco/disco-plugins
-                java -jar /home/ec2-user/MonoToMicro/MonoToMicroLegacy/build/libs/MonoToMicroLegacy-0.0.1-SNAPSHOT.jar &> /home/ec2-user/MonoToMicro/MonoToMicroLegacy/build/libs/app.log &
+                java -javaagent:/home/ec2-user/MonoToMicro/xrayagent/disco/disco-java-agent.jar=pluginPath=/home/ec2-user/MonoToMicro/xrayagent/disco/disco-plugins -jar /home/ec2-user/MonoToMicro/MonoToMicroLegacy/build/libs/MonoToMicroLegacy-0.0.1-SNAPSHOT.jar &> /home/ec2-user/MonoToMicro/MonoToMicroLegacy/build/libs/app.log &
               mode: '000555'
               group: ec2-user
               user: ec2-user
