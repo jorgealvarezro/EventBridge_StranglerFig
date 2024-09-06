@@ -446,7 +446,7 @@ Resources:
               content: |
                 #!/bin/bash
                 export AWS_XRAY_TRACING_NAME="My LegacyApp"
-                java -javaagent:/<path-to-disco>/disco-java-agent.jar=pluginPath=/<path-to-disco>/disco-plugins -jar /home/ec2-user/MonoToMicro/MonoToMicroLegacy/build/libs/MonoToMicroLegacy-0.0.1-SNAPSHOT.jar &> /home/ec2-user/MonoToMicro/MonoToMicroLegacy/build/libs/app.log &
+                java -javaagent:/home/ec2-user/MonoToMicro/xrayagent/disco/disco-java-agent.jar=pluginPath=/home/ec2-user/MonoToMicro/xrayagent/disco/disco-plugins -jar /home/ec2-user/MonoToMicro/MonoToMicroLegacy/build/libs/MonoToMicroLegacy-0.0.1-SNAPSHOT.jar
               mode: '000555'
               group: ec2-user
               user: ec2-user
@@ -481,10 +481,15 @@ Resources:
 
           curl https://s3.us-east-2.amazonaws.com/aws-xray-assets.us-east-2/xray-daemon/aws-xray-daemon-3.x.rpm -o /home/ec2-user/xray.rpm
           yum install -y /home/ec2-user/xray.rpm
+
+          cd /home/ec2-user/
+          wget https://github.com/aws/aws-xray-java-agent/releases/latest/download/xray-agent.zip
+          mkdir -p /home/ec2-user/MonoToMicro/xrayagent/
+          unzip /home/ec2-user/xray-agent.zip -d /home/ec2-user/MonoToMicro/xrayagent/
+
       Tags:
         - Key: Name
           Value: MonoToMicroEC2
-
   PublicDnsNameSSMParam:
     Type: AWS::SSM::Parameter
     Properties:
