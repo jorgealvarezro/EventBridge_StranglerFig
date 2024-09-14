@@ -245,16 +245,36 @@ Resources:
     Properties:
       RetentionInDays: 7
   
-  XRAYInstanceProfile:
+  EC2InstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
       Roles:
-        - !Ref XRAYInstanceRole
+        - !Ref EC2InstanceRole
+  
+  S3Policy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub ${AWS::StackName}-S3Policy
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetBucketLocation
+              - s3:GetObject
+              - s3:PutObject
+            Resource:
+              - !GetAtt AssetBucket.Arn
+              - !Join
+                - ''
+                - - !GetAtt AssetBucket.Arn
+                  - /*
+      Roles:
+        - !Ref EC2InstanceRole
 
-  XRAYInstanceRole:
+  EC2InstanceRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub ${AWS::StackName}-XRAYInstanceRole
+      RoleName: !Sub ${AWS::StackName}-MonotoMicroRole
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
@@ -266,6 +286,8 @@ Resources:
               - sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
   DBInstance:
     Type: AWS::EC2::Instance
     CreationPolicy:
@@ -376,6 +398,8 @@ Resources:
               command: |
                 cd /home/ec2-user/MonoToMicro/MonoToMicroLegacy
                 ./gradlew clean build
+                cd /home/ec2-user/MonoToMicro/MonoToMicroLambda
+                ./gradlew clean shadowJar
             3-install-nginx:
               command: !Join
                 - ''
@@ -397,6 +421,11 @@ Resources:
                     echo 'location /api/ { proxy_pass http://127.0.0.1:8080/; }' > /etc/nginx/default.d/001-api.conf
                   - >
                     systemctl start nginx
+            4-populate-buckets:
+              command: !Sub |
+                AWS_DEFAULT_REGION=${AWS::Region}
+                aws s3 cp /home/ec2-user/MonoToMicro/MonoToMicroLambda/build/libs s3://${AssetBucket}/ --recursive
+                aws s3 cp /home/ec2-user/MonoToMicro/MonoToMicroLegacy/build/libs s3://${AssetBucket}/ --recursive
         create-service-files:
           files:
             /etc/systemd/system/mono2micro.service:
@@ -475,7 +504,7 @@ Resources:
       InstanceType: t3.small
       ImageId: !Ref LatestAmiId
       SubnetId: !Ref MonoToMicroSubnet1
-      IamInstanceProfile: !Ref XRAYInstanceProfile
+      IamInstanceProfile: !Ref EC2InstanceProfile
       SecurityGroupIds:
         - !Ref EC2SecurityGroup
       UserData:
@@ -505,6 +534,77 @@ Resources:
       Value: !Ref MonoToMicroVPC
       Type: String
       Description: Monolith VPC ID
+
+AssetBucket:
+    Type: AWS::S3::Bucket
+
+LambdaAssetBucketSSMParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: LambdaAssetBucketName
+      Type: String
+      Value: !Ref AssetBucket
+
+AddUnicornToBasketLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: AddUnicornToBasket
+      Description: Lambda that adds a unicorn into a basket.
+      Runtime: java11
+      MemorySize: 1024
+      Timeout: 30
+      Layers:
+        - !Sub "arn:aws:lambda:${AWS::Region}:580247275435:layer:LambdaInsightsExtension:38"
+      Code:
+        S3Bucket: '{{resolve:ssm:LambdaAssetBucketName:1}}'
+        S3Key: MonoToMicroLambda-0.0.1.jar
+      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/service-role/MonoToMicroLambdaRole'
+      Handler: com.monoToMicro.Lambda.UnicornBasketImpl::addUnicornToBasket
+      TracingConfig:
+        Mode: Active
+      Tags:
+        - Key: AppName
+          Value: UnicornShop
+  RemoveUnicornFromBasketLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: RemoveUnicornFromBasket
+      Description: Lambda that removes a unicorn from a basket.
+      Runtime: java11
+      MemorySize: 1024
+      Timeout: 30
+      Layers:
+        - !Sub "arn:aws:lambda:${AWS::Region}:580247275435:layer:LambdaInsightsExtension:38"
+      Code:
+        S3Bucket: '{{resolve:ssm:LambdaAssetBucketName:1}}'
+        S3Key: MonoToMicroLambda-0.0.1.jar
+      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/service-role/MonoToMicroLambdaRole'
+      Handler: com.monoToMicro.Lambda.UnicornBasketImpl::removeUnicornFromBasket
+      TracingConfig:
+        Mode: Active
+      Tags:
+        - Key: AppName
+          Value: UnicornShop
+  GetUnicornsBasketLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: GetUnicornsBasket
+      Description: Lambda that lists the unicorns in a basket.
+      Runtime: java11
+      MemorySize: 1024
+      Timeout: 30
+      Layers:
+        - !Sub "arn:aws:lambda:${AWS::Region}:580247275435:layer:LambdaInsightsExtension:38"
+      Code:
+        S3Bucket: '{{resolve:ssm:LambdaAssetBucketName:1}}'
+        S3Key: MonoToMicroLambda-0.0.1.jar
+      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/service-role/MonoToMicroLambdaRole'
+      Handler: com.monoToMicro.Lambda.UnicornBasketImpl::getUnicornsBasket
+      TracingConfig:
+        Mode: Active
+      Tags:
+        - Key: AppName
+          Value: UnicornShop
 
 Outputs:
   WebsiteURL:
