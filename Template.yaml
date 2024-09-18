@@ -514,9 +514,25 @@ Resources:
           sudo yum install -y aws-cfn-bootstrap 
           /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource EC2Instance --region ${AWS::Region} --configsets default
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource EC2Instance --region ${AWS::Region}
+
+          # Send signal to WaitCondition
+          SIGNAL_URL="${MyWaitHandle}"
+          curl -X PUT -H 'Content-Type:' --data-binary '{"Status": "SUCCESS","Reason": "Configuration Complete","UniqueId": "MyWaitCondition","Data": "Application has completed configuration."}' "$SIGNAL_URL"
       Tags:
         - Key: Name
           Value: MonoToMicroEC2
+  
+  MyWaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+  
+  MyWaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn : "EC2Instance"
+    Properties:
+      Handle: !Ref MyWaitHandle
+      Timeout: '1860'
+      Count: 1
+
   PublicDnsNameSSMParam:
     Type: AWS::SSM::Parameter
     Properties:
@@ -535,40 +551,36 @@ Resources:
       Type: String
       Description: Monolith VPC ID
 
-AssetBucket:
+  AssetBucket:
     Type: AWS::S3::Bucket
 
-LambdaAssetBucketSSMParam:
-    Type: AWS::SSM::Parameter
-    Properties:
-      Name: LambdaAssetBucketName
-      Type: String
-      Value: !Ref AssetBucket
+  CreateUserLambda:
+      Type: AWS::Lambda::Function
+      DependsOn: MyWaitCondition
+      Properties:
+        FunctionName: CreateUserLambda
+        Description: Lambda that adds a unicorn into a basket.
+        Runtime: java11
+        MemorySize: 1024
+        Timeout: 30
+        Layers:
+          - !Sub "arn:aws:lambda:${AWS::Region}:580247275435:layer:LambdaInsightsExtension:38"
+        Code:
+          S3Bucket: !Ref AssetBucket
+          S3Key: MonoToMicroLambda-0.0.1.jar
+        Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/service-role/MonoToMicroLambdaRole'
+        Handler: com.monoToMicro.Lambda.CreateHandler::handleRequest
+        TracingConfig:
+          Mode: Active
+        Tags:
+          - Key: AppName
+            Value: UnicornShop
 
-AddUnicornToBasketLambda:
+  LoginUserLambda:
     Type: AWS::Lambda::Function
+    DependsOn: MyWaitCondition
     Properties:
-      FunctionName: AddUnicornToBasket
-      Description: Lambda that adds a unicorn into a basket.
-      Runtime: java11
-      MemorySize: 1024
-      Timeout: 30
-      Layers:
-        - !Sub "arn:aws:lambda:${AWS::Region}:580247275435:layer:LambdaInsightsExtension:38"
-      Code:
-        S3Bucket: '{{resolve:ssm:LambdaAssetBucketName:1}}'
-        S3Key: MonoToMicroLambda-0.0.1.jar
-      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/service-role/MonoToMicroLambdaRole'
-      Handler: com.monoToMicro.Lambda.UnicornBasketImpl::addUnicornToBasket
-      TracingConfig:
-        Mode: Active
-      Tags:
-        - Key: AppName
-          Value: UnicornShop
-  RemoveUnicornFromBasketLambda:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: RemoveUnicornFromBasket
+      FunctionName: LoginUserLambda
       Description: Lambda that removes a unicorn from a basket.
       Runtime: java11
       MemorySize: 1024
@@ -576,19 +588,21 @@ AddUnicornToBasketLambda:
       Layers:
         - !Sub "arn:aws:lambda:${AWS::Region}:580247275435:layer:LambdaInsightsExtension:38"
       Code:
-        S3Bucket: '{{resolve:ssm:LambdaAssetBucketName:1}}'
+        S3Bucket: !Ref AssetBucket
         S3Key: MonoToMicroLambda-0.0.1.jar
       Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/service-role/MonoToMicroLambdaRole'
-      Handler: com.monoToMicro.Lambda.UnicornBasketImpl::removeUnicornFromBasket
+      Handler: com.monoToMicro.Lambda.LoginHandler::handleRequest
       TracingConfig:
         Mode: Active
       Tags:
         - Key: AppName
           Value: UnicornShop
-  GetUnicornsBasketLambda:
+
+  SearchUserLambda:
     Type: AWS::Lambda::Function
+    DependsOn: MyWaitCondition
     Properties:
-      FunctionName: GetUnicornsBasket
+      FunctionName: SearchUserLambda
       Description: Lambda that lists the unicorns in a basket.
       Runtime: java11
       MemorySize: 1024
@@ -596,15 +610,66 @@ AddUnicornToBasketLambda:
       Layers:
         - !Sub "arn:aws:lambda:${AWS::Region}:580247275435:layer:LambdaInsightsExtension:38"
       Code:
-        S3Bucket: '{{resolve:ssm:LambdaAssetBucketName:1}}'
+        S3Bucket: !Ref AssetBucket
         S3Key: MonoToMicroLambda-0.0.1.jar
       Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/service-role/MonoToMicroLambdaRole'
-      Handler: com.monoToMicro.Lambda.UnicornBasketImpl::getUnicornsBasket
+      Handler: com.monoToMicro.Lambda.SearchHandler::handleRequest
       TracingConfig:
         Mode: Active
       Tags:
         - Key: AppName
           Value: UnicornShop
+
+  DynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: unishop-users
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: uuid
+          AttributeType: S
+      KeySchema:
+        - AttributeName: uuid
+          KeyType: HASH
+      Tags:
+        - Key: Name
+          Value: MonoToMicroDDBTable
+        - Key: AppName
+          Value: UnicornShop
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: MonoToMicroLambdaRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+        - arn:aws:iam::aws:policy/CloudWatchLambdaInsightsExecutionRolePolicy
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /service-role/
+      Policies:
+        - PolicyName: LambdaDynamoDBAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:DescribeTable
+                  - dynamodb:GetItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !GetAtt DynamoDBTable.Arn
 
 Outputs:
   WebsiteURL:
