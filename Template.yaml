@@ -16,6 +16,10 @@ Parameters:
   MyIPAddress:
     Type: String
     Description: My public IP Address
+  StageName:
+    Type: String
+    Default: prod
+    Description: Name of Stage for API Gateway
 
 Resources:
   MonoToMicroVPC:
@@ -199,13 +203,7 @@ Resources:
       Tags:
         - Key: Name
           Value: MonoToMicroDBSG
-  DBSubnetGroup:
-    Type: AWS::RDS::DBSubnetGroup
-    Properties:
-      DBSubnetGroupDescription: MonoToMicroDBSubnetGroup
-      SubnetIds:
-        - !Ref MonoToMicroSubnet1
-        - !Ref MonoToMicroSubnet2
+
   EC2SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -670,7 +668,266 @@ Resources:
                   - dynamodb:Query
                   - dynamodb:Scan
                 Resource: !GetAtt DynamoDBTable.Arn
+  
+  MyNetworkLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn: MyWaitCondition
+    Properties:
+      Name: my-network-load-balancer
+      Scheme: internal
+      Type: network
+      Subnets: 
+        - !Ref MonoToMicroSubnet1
+      SecurityGroups:
+        - !Ref NLBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: MyNLB
 
+  NLBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for NLB
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref MonoToMicroVPC
+      Tags:
+        - Key: Name
+          Value: NLBSecurityGroup
+
+  NLBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref NLBTargetGroup
+      LoadBalancerArn: !Ref MyNetworkLoadBalancer
+      Port: 80
+      Protocol: TCP
+  
+  NLBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: TCP
+      Port: 80
+      Protocol: TCP
+      TargetType: instance
+      VpcId: !Ref MonoToMicroVPC
+      Targets:
+        - Id: !Ref EC2Instance
+      Tags:
+        - Key: Name
+          Value: MyNLBTargetGroup
+  
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/${RestAPIGateway}
+      RetentionInDays: 7
+
+  ApiCWLRoleArn:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt CloudWatchRole.Arn
+
+  CloudWatchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Action: "sts:AssumeRole"
+          Effect: Allow
+          Principal:
+            Service: apigateway.amazonaws.com
+      Path: /
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs"
+
+  LambdaSMAndExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: root
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:*
+            Resource: arn:aws:logs:*:*:*
+      - PolicyName: AllowSM
+        PolicyDocument: 
+            Version: '2012-10-17'
+            Statement: 
+              - Effect: Allow
+                Action: 
+                - secretsmanager:GetSecretValue
+                Resource: !Ref PrivateAuthenticationToken
+  
+  PrivateAuthenticationToken:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: API Key
+      Name: AuthorizationToken
+      GenerateSecretString:
+        PasswordLength: 30
+        ExcludePunctuation: True
+        GenerateStringKey: apiKey
+        SecretStringTemplate: !Sub "{}"
+
+  LambdaAuthorizer:
+    Type: AWS::Serverless::Function
+    Properties:
+      AutoPublishAlias: current
+      CodeUri: LambdaAuthorizer/
+      Handler: app.handler
+      Role: !GetAtt LambdaSMAndExecutionRole.Arn
+      Runtime: nodejs16.x
+      FunctionName: LambdaAuthorizer
+
+  MyVPCLink:
+    Type: AWS::ApiGateway::VpcLink
+    DependsOn: MyNetworkLoadBalancer
+    Properties:
+      Name: my-vpc-link
+      Description: VPC Link to connect API Gateway to my internal NLB
+      TargetArns: 
+        - !Ref MyNetworkLoadBalancer 
+  
+  RestAPIGateway:
+      Type: "AWS::Serverless::Api"
+      Properties:
+        Auth:
+          DefaultAuthorizer: MyLambdaRequestAuthorizer
+          Authorizers:
+            MyLambdaRequestAuthorizer:
+              FunctionPayloadType: REQUEST
+              FunctionArn: !GetAtt LambdaAuthorizer.Arn
+              Identity:
+                Headers:
+                  - AuthorizationToken
+        EndpointConfiguration:
+          Type: REGIONAL
+        StageName: !Ref StageName
+        AccessLogSetting:
+          DestinationArn: !Sub ${ApiAccessLogGroup.Arn}
+          Format: "{ 'requestId':'$context.requestId', 'ip': '$context.identity.sourceIp', 'apiId':'$context.apiId', 'DomainName':'$context.domainName','requestTime':'$context.requestTime','httpMethod':'$context.httpMethod','resourcePath':'$context.resourcePath', 'status':'$context.status','protocol':'$context.protocol', 'responseLength':'$context.responseLength','error':'$context.error.message','stage':'$context.stage'}"
+        MethodSettings:
+          - MetricsEnabled: True
+            ResourcePath: "/*"
+            HttpMethod: "*"
+
+        DefinitionBody:
+          swagger: 2.0
+          x-amazon-apigateway-request-validators:
+            basic:
+              validateRequestBody: true
+              validateRequestParameters: true
+          info:
+            title: !Sub API-${FunctionName}-${StageName}
+          schemes:
+          - "https"
+          paths:
+            /proxysolution:
+              get:
+                produces:
+                - "application/json"
+                responses:
+                  "200":
+                    description: "200 response"
+                    schema:
+                      $ref: "#/definitions/Empty"
+                    headers:
+                      Access-Control-Allow-Origin:
+                        type: "string"
+                x-amazon-apigateway-integration:
+                  responses:
+                    default:
+                      statusCode: "200"
+                  uri: !Sub "http://${MyInternalNetworkLoadBalancer.DNSName}"
+                  passthroughBehavior: "when_no_match"
+                  httpMethod: "GET"
+                  type: "http_proxy"
+                  connectionType: "VPC_LINK"
+                  connectionId: 
+                    Fn::Ref: MyVPCLink
+            /proxysolution/api/user:
+              post:
+                produces:
+                - "application/json"
+                responses:
+                  "200":
+                    description: "200 response"
+                    schema:
+                      $ref: "#/definitions/Empty"
+                x-amazon-apigateway-integration:
+                  uri: 
+                    Fn::Sub: "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CreateUserLambda.Arn}/invocations"
+                  responses:
+                    default:
+                      statusCode: "200"
+                  passthroughBehavior: "when_no_match"
+                  httpMethod: "POST"
+                  contentHandling: "CONVERT_TO_TEXT"
+                  type: "aws_proxy"
+            /proxysolution/api/user/login:
+              post:
+                produces:
+                - "application/json"
+                responses:
+                  "200":
+                    description: "200 response"
+                    schema:
+                      $ref: "#/definitions/Empty"
+                x-amazon-apigateway-integration:
+                  uri: 
+                    Fn::Sub: "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LoginUserLambda.Arn}/invocations"
+                  responses:
+                    default:
+                      statusCode: "200"
+                  passthroughBehavior: "when_no_match"
+                  httpMethod: "POST"
+                  contentHandling: "CONVERT_TO_TEXT"
+                  type: "aws_proxy"
+            /proxysolution/{proxy+}:
+              x-amazon-apigateway-any-method:
+                produces:
+                - "application/json"
+                parameters:
+                - name: "proxy"
+                  in: "path"
+                  required: true
+                  type: "string"
+                responses: {}
+              x-amazon-apigateway-integration:
+                uri: "http://${MyInternalNetworkLoadBalancer.DNSName}/{proxy}"
+                httpMethod: "ANY"
+                type: "http_proxy"
+                passthroughBehavior: "when_no_match"
+                connectionType: "VPC_LINK"
+                connectionId: 
+                  Fn::Ref: MyVPCLink
+                requestParameters:
+                  integration.request.path.proxy: "method.request.path.proxy"
+          definitions:
+            Empty:
+              type: "object"
+              title: "Empty Schema"      
 Outputs:
   WebsiteURL:
     Value: !GetAtt
@@ -682,3 +939,11 @@ Outputs:
       - VpcIdSSMParam
       - Value
     Description: VPC where the monolith is running
+  APIUrlOutput:
+    Value:
+      !Join [
+        "/",
+        [
+          !Sub "https://${RestAPIGateway}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+        ],
+      ]
