@@ -20,6 +20,18 @@ Parameters:
     Type: String
     Default: prod
     Description: Name of Stage for API Gateway
+  SlackApiKey:
+    Type: String
+    Description: "API Key value (without 'Bearer ' prefix) for connecting to Slack"
+    NoEcho: true
+  SlackAPIAddress:
+    Type: String
+    Description: "Url to connect with Slack, please review official documentation"
+    Default: "https://slack.com/api/chat.postMessage"
+  SlackChannelId:
+    Type: String
+    Description: "Slack channel ID to send notifications"
+    Default: "C07NNGC2LV6"
 
 Resources:
   MonoToMicroVPC:
@@ -230,6 +242,17 @@ Resources:
       Tags:
         - Key: Name
           Value: MonoToMicroEC2SG
+
+  EC2SecurityGroupIngressFromNLB:
+    Type: AWS::EC2::SecurityGroupIngress
+    DependsOn: MyNetworkLoadBalancer
+    Properties:
+      GroupId: !Ref EC2SecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId: !Ref NLBSecurityGroup
+
   EC2SecurityGroupDBRule:
     Type: AWS::EC2::SecurityGroupEgress
     Properties:
@@ -272,7 +295,7 @@ Resources:
   EC2InstanceRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub ${AWS::StackName}-MonotoMicroRole
+      RoleName: !Sub ${AWS::StackName}-MonotoMicroRoleEc2
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
@@ -424,6 +447,9 @@ Resources:
                 AWS_DEFAULT_REGION=${AWS::Region}
                 aws s3 cp /home/ec2-user/MonoToMicro/MonoToMicroLambda/build/libs s3://${AssetBucket}/ --recursive
                 aws s3 cp /home/ec2-user/MonoToMicro/MonoToMicroLegacy/build/libs s3://${AssetBucket}/ --recursive
+                cd /home/ec2-user/MonoToMicro/LambdaAuthorizer
+                zip -r lambda-authorizer.zip .
+                aws s3 cp /home/ec2-user/MonoToMicro/LambdaAuthorizer/lambda-authorizer.zip s3://${AssetBucket}/lambda-authorizer.zip
         create-service-files:
           files:
             /etc/systemd/system/mono2micro.service:
@@ -629,6 +655,8 @@ Resources:
       KeySchema:
         - AttributeName: uuid
           KeyType: HASH
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
       Tags:
         - Key: Name
           Value: MonoToMicroDDBTable
@@ -638,7 +666,7 @@ Resources:
   LambdaRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: MonoToMicroLambdaRole
+      RoleName: !Sub ${AWS::StackName}-MonoToMicroLambdaRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
         - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
@@ -726,7 +754,7 @@ Resources:
   ApiAccessLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub /aws/apigateway/${RestAPIGateway}
+      LogGroupName: !Sub /aws/apigateway/API-stranglerandleaverlayer-${StageName}
       RetentionInDays: 7
 
   ApiCWLRoleArn:
@@ -791,143 +819,270 @@ Resources:
         SecretStringTemplate: !Sub "{}"
 
   LambdaAuthorizer:
-    Type: AWS::Serverless::Function
+    Type: AWS::Lambda::Function
+    DependsOn: MyWaitCondition
     Properties:
-      AutoPublishAlias: current
-      CodeUri: LambdaAuthorizer/
+      FunctionName: LambdaAuthorizer
+      Code:
+          S3Bucket: !Ref AssetBucket
+          S3Key: lambda-authorizer.zip
       Handler: app.handler
       Role: !GetAtt LambdaSMAndExecutionRole.Arn
       Runtime: nodejs16.x
-      FunctionName: LambdaAuthorizer
 
   MyVPCLink:
     Type: AWS::ApiGateway::VpcLink
-    DependsOn: MyNetworkLoadBalancer
     Properties:
       Name: my-vpc-link
       Description: VPC Link to connect API Gateway to my internal NLB
       TargetArns: 
         - !Ref MyNetworkLoadBalancer 
-  
-  RestAPIGateway:
-      Type: "AWS::Serverless::Api"
-      Properties:
-        Auth:
-          DefaultAuthorizer: MyLambdaRequestAuthorizer
-          Authorizers:
-            MyLambdaRequestAuthorizer:
-              FunctionPayloadType: REQUEST
-              FunctionArn: !GetAtt LambdaAuthorizer.Arn
-              Identity:
-                Headers:
-                  - AuthorizationToken
-        EndpointConfiguration:
-          Type: REGIONAL
-        StageName: !Ref StageName
-        AccessLogSetting:
-          DestinationArn: !Sub ${ApiAccessLogGroup.Arn}
-          Format: "{ 'requestId':'$context.requestId', 'ip': '$context.identity.sourceIp', 'apiId':'$context.apiId', 'DomainName':'$context.domainName','requestTime':'$context.requestTime','httpMethod':'$context.httpMethod','resourcePath':'$context.resourcePath', 'status':'$context.status','protocol':'$context.protocol', 'responseLength':'$context.responseLength','error':'$context.error.message','stage':'$context.stage'}"
-        MethodSettings:
-          - MetricsEnabled: True
-            ResourcePath: "/*"
-            HttpMethod: "*"
 
-        DefinitionBody:
-          swagger: 2.0
-          x-amazon-apigateway-request-validators:
-            basic:
-              validateRequestBody: true
-              validateRequestParameters: true
-          info:
-            title: !Sub API-${FunctionName}-${StageName}
-          schemes:
+  RestAPIGateway:
+    Type: "AWS::ApiGateway::RestApi"
+    DependsOn: MyWaitCondition
+    Properties:
+      Name: !Sub "API-stranglerandleaverlayer-${StageName}"
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Body:
+        swagger: 2.0
+        x-amazon-apigateway-request-validators:
+          basic:
+            validateRequestBody: true
+            validateRequestParameters: true
+        info:
+          title: !Sub "API-stranglerandleaverlayer-${StageName}"
+        schemes:
           - "https"
-          paths:
-            /proxysolution:
-              get:
-                produces:
+        paths:
+          /proxysolution:
+            get:
+              produces:
                 - "application/json"
+              responses:
+                "200":
+                  description: "200 response"
+                  schema:
+                    $ref: "#/definitions/Empty"
+                  headers:
+                    Access-Control-Allow-Origin:
+                      type: "string"
+              x-amazon-apigateway-integration:
                 responses:
-                  "200":
-                    description: "200 response"
-                    schema:
-                      $ref: "#/definitions/Empty"
-                    headers:
-                      Access-Control-Allow-Origin:
-                        type: "string"
-                x-amazon-apigateway-integration:
-                  responses:
-                    default:
-                      statusCode: "200"
-                  uri: !Sub "http://${MyInternalNetworkLoadBalancer.DNSName}"
-                  passthroughBehavior: "when_no_match"
-                  httpMethod: "GET"
-                  type: "http_proxy"
-                  connectionType: "VPC_LINK"
-                  connectionId: 
-                    Fn::Ref: MyVPCLink
-            /proxysolution/api/user:
-              post:
-                produces:
+                  default:
+                    statusCode: "200"
+                uri: !Sub "http://${MyNetworkLoadBalancer.DNSName}"
+                passthroughBehavior: "when_no_match"
+                httpMethod: "GET"
+                type: "http_proxy"
+                connectionType: "VPC_LINK"
+                connectionId: !Ref MyVPCLink
+          /proxysolution/api/user:
+            post:
+              produces:
                 - "application/json"
+              responses:
+                "200":
+                  description: "200 response"
+                  schema:
+                    $ref: "#/definitions/Empty"
+              x-amazon-apigateway-integration:
+                uri: 
+                  Fn::Sub: "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CreateUserLambda.Arn}/invocations"
                 responses:
-                  "200":
-                    description: "200 response"
-                    schema:
-                      $ref: "#/definitions/Empty"
-                x-amazon-apigateway-integration:
-                  uri: 
-                    Fn::Sub: "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CreateUserLambda.Arn}/invocations"
-                  responses:
-                    default:
-                      statusCode: "200"
-                  passthroughBehavior: "when_no_match"
-                  httpMethod: "POST"
-                  contentHandling: "CONVERT_TO_TEXT"
-                  type: "aws_proxy"
-            /proxysolution/api/user/login:
-              post:
-                produces:
+                  default:
+                    statusCode: "200"
+                passthroughBehavior: "when_no_match"
+                httpMethod: "POST"
+                contentHandling: "CONVERT_TO_TEXT"
+                type: "aws_proxy"
+          /proxysolution/api/user/login:
+            post:
+              produces:
                 - "application/json"
+              responses:
+                "200":
+                  description: "200 response"
+                  schema:
+                    $ref: "#/definitions/Empty"
+              x-amazon-apigateway-integration:
+                uri: 
+                  Fn::Sub: "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LoginUserLambda.Arn}/invocations"
                 responses:
-                  "200":
-                    description: "200 response"
-                    schema:
-                      $ref: "#/definitions/Empty"
-                x-amazon-apigateway-integration:
-                  uri: 
-                    Fn::Sub: "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LoginUserLambda.Arn}/invocations"
-                  responses:
-                    default:
-                      statusCode: "200"
-                  passthroughBehavior: "when_no_match"
-                  httpMethod: "POST"
-                  contentHandling: "CONVERT_TO_TEXT"
-                  type: "aws_proxy"
-            /proxysolution/{proxy+}:
-              x-amazon-apigateway-any-method:
-                produces:
+                  default:
+                    statusCode: "200"
+                passthroughBehavior: "when_no_match"
+                httpMethod: "POST"
+                contentHandling: "CONVERT_TO_TEXT"
+                type: "aws_proxy"
+          /proxysolution/{proxy+}:
+            x-amazon-apigateway-any-method:
+              produces:
                 - "application/json"
-                parameters:
+              parameters:
                 - name: "proxy"
                   in: "path"
                   required: true
                   type: "string"
-                responses: {}
+              responses: {}
               x-amazon-apigateway-integration:
-                uri: "http://${MyInternalNetworkLoadBalancer.DNSName}/{proxy}"
+                uri: !Sub "http://${MyNetworkLoadBalancer.DNSName}/{proxy}"
                 httpMethod: "ANY"
                 type: "http_proxy"
                 passthroughBehavior: "when_no_match"
                 connectionType: "VPC_LINK"
-                connectionId: 
-                  Fn::Ref: MyVPCLink
+                connectionId: !Ref MyVPCLink
                 requestParameters:
                   integration.request.path.proxy: "method.request.path.proxy"
-          definitions:
-            Empty:
-              type: "object"
-              title: "Empty Schema"      
+        definitions:
+          Empty:
+            type: "object"
+            title: "Empty Schema"
+
+  RestAPIGatewayStage:
+    Type: "AWS::ApiGateway::Stage"
+    Properties:
+      DeploymentId: !Ref RestAPIGatewayDeployment
+      RestApiId: !Ref RestAPIGateway
+      StageName: !Ref StageName
+      AccessLogSetting:
+        DestinationArn: !Sub ${ApiAccessLogGroup.Arn}
+        Format: "{ 'requestId':'$context.requestId', 'ip': '$context.identity.sourceIp', 'apiId':'$context.apiId', 'DomainName':'$context.domainName','requestTime':'$context.requestTime','httpMethod':'$context.httpMethod','resourcePath':'$context.resourcePath', 'status':'$context.status','protocol':'$context.protocol', 'responseLength':'$context.responseLength','error':'$context.error.message','stage':'$context.stage'}"
+      MethodSettings:
+        - MetricsEnabled: true
+          ResourcePath: "/*"
+          HttpMethod: "*"
+
+  RestAPIGatewayDeployment:
+    Type: "AWS::ApiGateway::Deployment"
+    DependsOn: RestAPIGateway
+    Properties:
+      RestApiId: !Ref RestAPIGateway
+
+  RestAPIGatewayAuthorizer:
+    Type: "AWS::ApiGateway::Authorizer"
+    Properties:
+      RestApiId: !Ref RestAPIGateway
+      Name: MyLambdaRequestAuthorizer
+      Type: REQUEST
+      AuthorizerUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaAuthorizer.Arn}/invocations"
+      IdentitySource: "method.request.header.AuthorizationToken"
+
+  MySlackAPIDestination:
+    Type: AWS::Events::ApiDestination
+    Properties:
+      ConnectionArn:
+        Fn::GetAtt:
+          - MyNewSlackConnection
+          - Arn
+      HttpMethod: POST
+      InvocationEndpoint: !Ref SlackAPIAddress
+      InvocationRateLimitPerSecond: 300
+      Name: New_User_Incoming
+
+  MyNewSlackConnection:
+    Type: AWS::Events::Connection
+    Properties:
+      Name: Slack_integration
+      AuthorizationType: API_KEY
+      AuthParameters:
+        ApiKeyAuthParameters:
+          ApiKeyName: Authorization
+          ApiKeyValue:
+            Fn::Join:
+              - ""
+              - - "Bearer "
+                - !Ref SlackApiKey
+
+  RoleForPipeConnection:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-Amazon_EventBridge_Pipe_UserCreationFromUnicorn
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pipes.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceArn: !GetAtt UserCreationFromUnicornPipe.SourceArn 
+                aws:SourceAccount: ${AWS::AccountId}
+      MaxSessionDuration: 3600
+      
+  PolicyForApiDestinationTarget:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      PolicyName: !Sub ${AWS::StackName}-ApiDestinationPipeTargetTemplate
+      RoleName: !Ref RoleForPipeConnection
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - events:InvokeApiDestination
+            Resource: 
+              - !GetAtt MySlackAPIDestination.Arn
+
+  PolicyForDynamoDB:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      PolicyName: !Sub ${AWS::StackName}-DynamoDbPipeSourceTemplate
+      RoleName: !Ref RoleForPipeConnection
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:DescribeStream
+              - dynamodb:GetRecords
+              - dynamodb:GetShardIterator
+              - dynamodb:ListStreams
+            Resource:
+              - !GetAtt DynamoDBTable.StreamArn
+
+  UserCreationFromUnicornPipe:
+    Type: AWS::Pipes::Pipe
+    DependsOn:
+      - MySlackAPIDestination
+      - RoleForPipeConnection
+      - PolicyForApiDestinationTarget
+      - PolicyForDynamoDB
+    Properties:
+      RoleArn:
+        Fn::GetAtt:
+          - RoleForPipeConnection
+          - Arn
+      Name: UserCreationFromUnicorn
+      DesiredState: RUNNING
+      Source: !GetAtt DynamoDBTable.StreamArn
+      SourceParameters:
+        DynamoDBStreamParameters:
+          BatchSize: 1
+          MaximumRecordAgeInSeconds: -1
+          MaximumRetryAttempts: -1
+          StartingPosition: LATEST
+      LogConfiguration:
+        CloudwatchLogsLogDestination:
+          LogGroupArn:
+            Fn::Sub: >-
+              arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vendedlogs/pipes/UserCreationFromUnicorn
+        Level: TRACE
+        IncludeExecutionData:
+          - ALL
+      TargetParameters:
+        InputTemplate: |-
+          {
+            "channel": "${SlackChannelId}",
+            "text": "New customer:\n Name - <$.dynamodb.NewImage.firstName.S>\n Surname - <$.dynamodb.NewImage.lastName.S>\n email - <$.dynamodb.NewImage.email.S>"
+          }
+      Target:
+        Fn::GetAtt:
+          - PolicyForApiDestinationTarget
+          - Arn
 Outputs:
   WebsiteURL:
     Value: !GetAtt
@@ -944,6 +1099,6 @@ Outputs:
       !Join [
         "/",
         [
-          !Sub "https://${RestAPIGateway}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+          !Sub "https://${RestAPIGateway}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/proxysolution/"
         ],
       ]
