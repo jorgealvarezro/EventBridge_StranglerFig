@@ -447,9 +447,6 @@ Resources:
                 AWS_DEFAULT_REGION=${AWS::Region}
                 aws s3 cp /home/ec2-user/MonoToMicro/MonoToMicroLambda/build/libs s3://${AssetBucket}/ --recursive
                 aws s3 cp /home/ec2-user/MonoToMicro/MonoToMicroLegacy/build/libs s3://${AssetBucket}/ --recursive
-                cd /home/ec2-user/MonoToMicro/LambdaAuthorizer
-                zip -r lambda-authorizer.zip .
-                aws s3 cp /home/ec2-user/MonoToMicro/LambdaAuthorizer/lambda-authorizer.zip s3://${AssetBucket}/lambda-authorizer.zip
         create-service-files:
           files:
             /etc/systemd/system/mono2micro.service:
@@ -587,12 +584,12 @@ Resources:
         Runtime: java11
         MemorySize: 1024
         Timeout: 30
+        Role: !GetAtt LambdaRole.Arn
         Layers:
           - !Sub "arn:aws:lambda:${AWS::Region}:580247275435:layer:LambdaInsightsExtension:38"
         Code:
           S3Bucket: !Ref AssetBucket
           S3Key: MonoToMicroLambda-0.0.1.jar
-        Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/service-role/MonoToMicroLambdaRole'
         Handler: com.monoToMicro.Lambda.CreateHandler::handleRequest
         TracingConfig:
           Mode: Active
@@ -609,12 +606,12 @@ Resources:
       Runtime: java11
       MemorySize: 1024
       Timeout: 30
+      Role: !GetAtt LambdaRole.Arn
       Layers:
         - !Sub "arn:aws:lambda:${AWS::Region}:580247275435:layer:LambdaInsightsExtension:38"
       Code:
         S3Bucket: !Ref AssetBucket
         S3Key: MonoToMicroLambda-0.0.1.jar
-      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/service-role/MonoToMicroLambdaRole'
       Handler: com.monoToMicro.Lambda.LoginHandler::handleRequest
       TracingConfig:
         Mode: Active
@@ -631,12 +628,12 @@ Resources:
       Runtime: java11
       MemorySize: 1024
       Timeout: 30
+      Role: !GetAtt LambdaRole.Arn
       Layers:
         - !Sub "arn:aws:lambda:${AWS::Region}:580247275435:layer:LambdaInsightsExtension:38"
       Code:
         S3Bucket: !Ref AssetBucket
         S3Key: MonoToMicroLambda-0.0.1.jar
-      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/service-role/MonoToMicroLambdaRole'
       Handler: com.monoToMicro.Lambda.SearchHandler::handleRequest
       TracingConfig:
         Mode: Active
@@ -666,7 +663,6 @@ Resources:
   LambdaRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub ${AWS::StackName}-MonoToMicroLambdaRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
         - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
@@ -680,7 +676,6 @@ Resources:
                 - lambda.amazonaws.com
             Action:
               - sts:AssumeRole
-      Path: /service-role/
       Policies:
         - PolicyName: LambdaDynamoDBAccess
           PolicyDocument:
@@ -818,18 +813,6 @@ Resources:
         GenerateStringKey: apiKey
         SecretStringTemplate: !Sub "{}"
 
-  LambdaAuthorizer:
-    Type: AWS::Lambda::Function
-    DependsOn: MyWaitCondition
-    Properties:
-      FunctionName: LambdaAuthorizer
-      Code:
-          S3Bucket: !Ref AssetBucket
-          S3Key: lambda-authorizer.zip
-      Handler: app.handler
-      Role: !GetAtt LambdaSMAndExecutionRole.Arn
-      Runtime: nodejs16.x
-
   MyVPCLink:
     Type: AWS::ApiGateway::VpcLink
     Properties:
@@ -941,12 +924,35 @@ Resources:
             type: "object"
             title: "Empty Schema"
 
+  LambdaPermissionForCreateUser:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CreateUserLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestAPIGateway}/*/*/*
+
+  LambdaPermissionForLoginUser:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LoginUserLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestAPIGateway}/*/*/*
+
   RestAPIGatewayStage:
     Type: "AWS::ApiGateway::Stage"
     Properties:
       DeploymentId: !Ref RestAPIGatewayDeployment
       RestApiId: !Ref RestAPIGateway
       StageName: !Ref StageName
+      TracingEnabled: true
+      MethodSettings:
+      - ResourcePath: "/*"
+        HttpMethod: "*"
+        MetricsEnabled: true
+        DataTraceEnabled: true
+        LoggingLevel: INFO
       AccessLogSetting:
         DestinationArn: !Sub ${ApiAccessLogGroup.Arn}
         Format: "{ 'requestId':'$context.requestId', 'ip': '$context.identity.sourceIp', 'apiId':'$context.apiId', 'DomainName':'$context.domainName','requestTime':'$context.requestTime','httpMethod':'$context.httpMethod','resourcePath':'$context.resourcePath', 'status':'$context.status','protocol':'$context.protocol', 'responseLength':'$context.responseLength','error':'$context.error.message','stage':'$context.stage'}"
@@ -960,15 +966,6 @@ Resources:
     DependsOn: RestAPIGateway
     Properties:
       RestApiId: !Ref RestAPIGateway
-
-  RestAPIGatewayAuthorizer:
-    Type: "AWS::ApiGateway::Authorizer"
-    Properties:
-      RestApiId: !Ref RestAPIGateway
-      Name: MyLambdaRequestAuthorizer
-      Type: REQUEST
-      AuthorizerUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaAuthorizer.Arn}/invocations"
-      IdentitySource: "method.request.header.AuthorizationToken"
 
   MySlackAPIDestination:
     Type: AWS::Events::ApiDestination
@@ -995,7 +992,7 @@ Resources:
               - ""
               - - "Bearer "
                 - !Ref SlackApiKey
-
+  
   RoleForPipeConnection:
     Type: AWS::IAM::Role
     Properties:
@@ -1007,12 +1004,32 @@ Resources:
             Principal:
               Service: pipes.amazonaws.com
             Action: sts:AssumeRole
-            Condition:
-              StringEquals:
-                aws:SourceArn: !GetAtt UserCreationFromUnicornPipe.SourceArn 
-                aws:SourceAccount: ${AWS::AccountId}
       MaxSessionDuration: 3600
-      
+
+  PipeRolePolicy:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      PolicyName: !Sub ${AWS::StackName}-PipeRolePolicy
+      RoleName: !Ref RoleForPipeConnection
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - logs:GetLogEvents
+              - logs:FilterLogEvents
+              - logs:DescribeLogStreams
+            Resource: 
+              - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vendedlogs/pipes/UserCreationFromUnicorn:*
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Resource: '*'
+            Condition:
+              StringLike:
+                aws:PrincipalArn: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AWS::StackName}-Amazon_EventBridge_Pipe_UserCreationFromUnicorn
+
   PolicyForApiDestinationTarget:
     Type: AWS::IAM::RolePolicy
     Properties:
@@ -1044,6 +1061,12 @@ Resources:
             Resource:
               - !GetAtt DynamoDBTable.StreamArn
 
+  PipeLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/vendedlogs/pipes/UserCreationFromUnicorn
+      RetentionInDays: 14  
+
   UserCreationFromUnicornPipe:
     Type: AWS::Pipes::Pipe
     DependsOn:
@@ -1067,22 +1090,21 @@ Resources:
           StartingPosition: LATEST
       LogConfiguration:
         CloudwatchLogsLogDestination:
-          LogGroupArn:
-            Fn::Sub: >-
-              arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vendedlogs/pipes/UserCreationFromUnicorn
+          LogGroupArn: !GetAtt PipeLogGroup.Arn
         Level: TRACE
         IncludeExecutionData:
           - ALL
       TargetParameters:
-        InputTemplate: |-
+        InputTemplate: !Sub |-
           {
             "channel": "${SlackChannelId}",
             "text": "New customer:\n Name - <$.dynamodb.NewImage.firstName.S>\n Surname - <$.dynamodb.NewImage.lastName.S>\n email - <$.dynamodb.NewImage.email.S>"
           }
       Target:
         Fn::GetAtt:
-          - PolicyForApiDestinationTarget
-          - Arn
+          - MySlackAPIDestination
+          - Arn  
+
 Outputs:
   WebsiteURL:
     Value: !GetAtt
